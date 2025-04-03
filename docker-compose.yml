@@ -1,0 +1,135 @@
+version: '3.8'
+services:
+  python-app:
+    build:
+      context: ./Chrome
+      dockerfile: Dockerfile
+    container_name: python
+    network_mode: "host"
+    volumes:
+      - ./Chrome:/Chrome
+    working_dir: /Chrome
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - CHROME_HOST=host.docker.internal
+      - CHROME_PORT=9222
+    restart: always
+
+  fluentd:
+    image: custom-fluentd:latest
+    container_name: fluentd
+    ports:
+      - "24224:24224"
+      - "24224:24224/udp"
+    volumes:
+      - ./fluentd/conf:/fluentd/etc
+      - ./fluentd/log:/fluentd/log
+    depends_on:
+      - broker
+    networks:
+      - data-pipeline
+
+  broker:
+    image: apache/kafka:4.0.0
+    hostname: broker
+    container_name: broker
+    ports:
+      - '9999:9999'
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT_HOST://broker:9999,PLAINTEXT://broker:19092'
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@broker:29093'
+      KAFKA_LISTENERS: 'CONTROLLER://:29093,PLAINTEXT_HOST://:9999,PLAINTEXT://:19092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      CLUSTER_ID: '4L6g3nShT-eMCtK--X86sw'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+    networks:
+      - data-pipeline
+
+  topics:
+    image: apache/kafka:4.0.0
+    environment:
+      - PYSPARK_PYTHON=/usr/local/bin/python3
+      - PYSPARK_DRIVER_PYTHON=/usr/local/bin/python3
+    command: >
+      bash -c "
+      echo 'Waiting for Kafka broker to be ready...';
+      while ! nc -z broker 9999; do
+        sleep 2;
+      done;
+      echo 'Creating topic browsing data...';
+      /opt/kafka/bin/kafka-topics.sh --create --topic browsing_data --bootstrap-server broker:9999 --partitions 1 --replication-factor 1;
+      echo 'Topic energy-monitor created successfully!';
+      "
+    depends_on:
+      - broker
+    networks:
+      - data-pipeline
+
+  spark:
+    build:
+      context: ./spark-apps
+    container_name: spark
+    hostname: spark
+    ports:
+      - '8080:8080'
+      - '7077:7077'
+    volumes:
+      - ./spark-apps:/opt/spark/apps
+      - ./spark-data:/opt/spark/data
+      - ./spark-apps/ivy-cache:/ivy
+
+    command: >
+      /opt/spark/bin/spark-submit
+      --conf spark.driver.extraJavaOptions="-Divy.cache.dir=/ivy -Divy.home=/ivy"
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.elasticsearch:elasticsearch-spark-30_2.12:8.17.0
+      /opt/spark/apps/Complete.py
+    depends_on:
+      - broker
+      - elasticsearch
+    networks:
+      - data-pipeline
+    restart: always
+
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - data-pipeline
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.17.0
+    container_name: kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+    networks:
+      - data-pipeline
+
+networks:
+  data-pipeline:
+    driver: bridge
+
+volumes:
+  elasticsearch-data:
