@@ -61,6 +61,9 @@ print("Modello ML caricato correttamente all'avvio!")
 active_sessions = {}   # Chiave: site, Valore: {seconds, timestamp, status}
 session_history = []   # Lista delle sessioni completate
 
+# Dizionario per tenere traccia del tempo cumulativo per ogni sito
+cumulative_site_time = defaultdict(int)  # Chiave: site, Valore: seconds_total
+
 # Contatori per le fasce orarie
 time_of_day_counters = {
     "mattina": 0,
@@ -80,11 +83,15 @@ counted_sites = {
 
 # Funzione per aggiornare le sessioni
 def update_session_data(site, seconds, timestamp, status):
-    global active_sessions, session_history
+    global active_sessions, session_history, cumulative_site_time
     if site in active_sessions and status == "active":
         active_sessions[site] = {"seconds": seconds, "timestamp": timestamp, "status": status}
         print(f"Aggiornata sessione attiva per {site}: {seconds} secondi")
     elif site in active_sessions and status == "closed":
+        # Aggiorna il tempo cumulativo per il sito quando una sessione viene chiusa
+        cumulative_site_time[site] += seconds
+        print(f"Aggiornato tempo cumulativo per {site}: ora totale {cumulative_site_time[site]} secondi")
+        
         session_history.append({"site": site, "seconds": seconds, "timestamp": timestamp, "status": "closed"})
         del active_sessions[site]
         print(f"Chiusa sessione per {site} e aggiunta alla cronologia: {seconds} secondi")
@@ -92,6 +99,10 @@ def update_session_data(site, seconds, timestamp, status):
         active_sessions[site] = {"seconds": seconds, "timestamp": timestamp, "status": status}
         print(f"Nuova sessione attiva per {site}: {seconds} secondi")
     elif site not in active_sessions and status == "closed":
+        # Aggiorna il tempo cumulativo anche per sessioni già chiuse
+        cumulative_site_time[site] += seconds
+        print(f"Aggiornato tempo cumulativo per {site}: ora totale {cumulative_site_time[site]} secondi")
+        
         session_history.append({"site": site, "seconds": seconds, "timestamp": timestamp, "status": "closed"})
         print(f"Aggiunta sessione già chiusa per {site}: {seconds} secondi")
 
@@ -243,6 +254,12 @@ def process_batch(batch_df, batch_id):
         print(f"{time_of_day}: {count} siti conteggiati")
     print(f"Dettaglio siti conteggiati: {counted_sites}\n")
 
+    # Stampa lo stato attuale del tempo cumulativo per sito
+    print("\n--- TEMPO CUMULATIVO PER SITO ---")
+    for site, total_seconds in sorted(cumulative_site_time.items(), key=lambda x: x[1], reverse=True):
+        print(f"{site}: {total_seconds} secondi totali")
+    print()
+
     # Effettua la predizione usando solo i dati recenti
     predicted_age = None
     if recent_navigation:
@@ -326,6 +343,37 @@ def process_batch(batch_df, batch_id):
         .save()
     
     print("Dati inviati a Elasticsearch con struttura semplificata per grafico a barre.")
+    
+    # ----- NUOVO INDICE PER LA CRONOLOGIA CUMULATIVA DEI SITI -----
+    # Creiamo un documento per ogni sito con tempo cumulativo
+    cumulative_site_documents = []
+    
+    for site, total_seconds in cumulative_site_time.items():
+        category = match_label(site)
+        cumulative_site_documents.append({
+            "timestamp": time.time(),
+            "site": site,
+            "category": category,
+            "seconds_total": total_seconds,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time()))
+        })
+    
+    if cumulative_site_documents:
+        # Crea un DataFrame con i documenti di cronologia cumulativa
+        cumulative_df = spark.createDataFrame(cumulative_site_documents)
+        
+        # Invia i documenti al nuovo indice per la cronologia cumulativa
+        cumulative_df.write \
+            .format("org.elasticsearch.spark.sql") \
+            .option("es.nodes", "elasticsearch") \
+            .option("es.port", "9200") \
+            .option("es.resource", "site_cumulative_time") \
+            .option("es.mapping.id", "site") \
+            .option("es.write.operation", "upsert") \
+            .mode("append") \
+            .save()
+        
+        print(f"Inviati {len(cumulative_site_documents)} documenti di cronologia cumulativa a Elasticsearch.")
 
 # Avvia lo streaming e processa ogni micro-batch
 query = parsed_df.writeStream \
@@ -335,4 +383,3 @@ query = parsed_df.writeStream \
     .start()
 
 query.awaitTermination()
-
