@@ -14,7 +14,6 @@ from datetime import datetime
 schema = StructType([
     StructField("site", StringType(), True),
     StructField("seconds", IntegerType(), True),
-    # Assumiamo che il timestamp sia in secondi; se fosse in millisecondi, dividere per 1000.
     StructField("timestamp", FloatType(), True),
     StructField("status", StringType(), True) 
 ])
@@ -50,10 +49,34 @@ spark = SparkSession.builder.appName("SessionTrackingAgePrediction").getOrCreate
 spark.sparkContext.setLogLevel("ERROR")
 
 # ---------------------------
+# Carica il modello ML una sola volta all'inizio
+# ---------------------------
+model_path = "/opt/spark/apps/model-spark"
+model = PipelineModel.load(model_path)
+print("Modello ML caricato correttamente all'avvio!")
+
+# ---------------------------
 # Struttura dati per memorizzare le sessioni attive
 # ---------------------------
 active_sessions = {}   # Chiave: site, Valore: {seconds, timestamp, status}
 session_history = []   # Lista delle sessioni completate
+
+# Contatori per le fasce orarie
+time_of_day_counters = {
+    "mattina": 0,
+    "pomeriggio": 0,
+    "sera": 0,
+    "notte": 0
+}
+
+# Set per tenere traccia dei siti già conteggiati per ciascuna fascia oraria
+# Struttura: {'mattina': set('sito1', 'sito2'), 'pomeriggio': set('sito3'), ...}
+counted_sites = {
+    "mattina": set(),
+    "pomeriggio": set(),
+    "sera": set(),
+    "notte": set()
+}
 
 # Funzione per aggiornare le sessioni
 def update_session_data(site, seconds, timestamp, status):
@@ -92,7 +115,7 @@ def get_recent_navigation_data(time_window_seconds=60):
     print(f"Dati recenti: {len(recent_data)} sessioni negli ultimi {time_window_seconds} secondi")
     return recent_data
 
-# Funzione per predire la fascia d'età (lasciamo invariato)
+# Funzione per predire la fascia d'età (usa il modello globale)
 def predict_age_group(navigation_data):
     if not navigation_data:
         print("Nessun dato di navigazione disponibile per la predizione")
@@ -120,8 +143,8 @@ def predict_age_group(navigation_data):
     model_input = percentages.copy()
     model_input["age_group"] = "unknown"
     model_input_df = spark.createDataFrame([model_input])
-    model_path = "/opt/spark/apps/model-spark"
-    model = PipelineModel.load(model_path)
+    
+    # Usa il modello globale caricato all'inizio
     prediction = model.transform(model_input_df)
     predicted_age = prediction.select("predicted_age_group").collect()[0][0]
     print("\n--- DISTRIBUZIONE PERCENTUALI PER CATEGORIA (ultimo minuto) ---")
@@ -130,6 +153,22 @@ def predict_age_group(navigation_data):
         if pct > 5:
             print(f"{category}: {pct:.1f}%")
     return predicted_age
+
+# Funzione per gestire il conteggio dei siti per fascia oraria
+def update_time_of_day_counter(site, part_of_day, status):
+    global time_of_day_counters, counted_sites
+    
+    # Se il sito è attivo e non è già stato conteggiato per questa fascia oraria
+    if status == "active" and site not in counted_sites[part_of_day]:
+        time_of_day_counters[part_of_day] += 1
+        counted_sites[part_of_day].add(site)
+        print(f"Incrementato contatore {part_of_day} per sito {site}")
+    
+    # Se il sito è chiuso e era stato conteggiato per questa fascia oraria
+    elif status == "closed" and site in counted_sites[part_of_day]:
+        # Non decrementiamo il contatore, ma rimuoviamo il sito dal set dei conteggiati
+        counted_sites[part_of_day].remove(site)
+        print(f"Rimosso sito {site} dal set dei conteggiati per {part_of_day}")
 
 # ---------------------------
 # Lettura dati da Kafka
@@ -170,6 +209,9 @@ def process_batch(batch_df, batch_id):
         else:
             part_of_day = "notte"
 
+        # Aggiorna il contatore della fascia oraria
+        update_time_of_day_counter(site, part_of_day, status)
+
         # Stampa il timestamp corretto in formato leggibile
         formatted_kafka_ts = time.strftime("%H:%M:%S - %d-%m-%Y", time.localtime(corrected_timestamp))
         print(f"Timestamp Kafka per {site}: {formatted_kafka_ts}")
@@ -194,6 +236,12 @@ def process_batch(batch_df, batch_id):
     print(f"Sessioni attive: {len(active_sessions)}")
     print(f"Sessioni storiche totali: {len(session_history)}")
     print(f"Dati recenti (ultimi 60 secondi): {len(recent_navigation)}\n")
+    
+    # Stampa lo stato attuale dei contatori
+    print("\n--- CONTATORI FASCE ORARIE ---")
+    for time_of_day, count in time_of_day_counters.items():
+        print(f"{time_of_day}: {count} siti conteggiati")
+    print(f"Dettaglio siti conteggiati: {counted_sites}\n")
 
     # Effettua la predizione usando solo i dati recenti
     predicted_age = None
@@ -219,7 +267,7 @@ def process_batch(batch_df, batch_id):
     # Crea un DataFrame con il documento combinato
     combined_df = spark.createDataFrame([combined_document])
     
-    # Invia il documento unico a Elasticsearch (indice "combined_navigation")
+    # Invia il documento di navigazione a Elasticsearch (indice "combined_navigation")
     combined_df.write \
         .format("org.elasticsearch.spark.sql") \
         .option("es.nodes", "elasticsearch") \
@@ -228,8 +276,56 @@ def process_batch(batch_df, batch_id):
         .option("es.mapping.id", "timestamp") \
         .mode("append") \
         .save()
-
-    print("Documento combinato inviato a Elasticsearch con tutte le informazioni sincronizzate.")
+    
+    # ----- SOLUZIONE SEMPLIFICATA PER GRAFICO A BARRE IN KIBANA -----
+    # Usiamo un approccio diverso: creare un documento separato per ogni fascia oraria
+    # con un campo che indica la fascia oraria e uno che contiene il conteggio
+    
+    # Crea una lista di documenti semplici, uno per ogni fascia oraria
+    simple_documents = []
+    
+    # Crea un documento per ogni fascia oraria con un ID univoco
+    simple_documents.append({
+        "timestamp": time.time(),
+        "fascia_oraria": "1-mattina",  # Prefissiamo con numeri per garantire l'ordine corretto
+        "siti_aperti": time_of_day_counters["mattina"]
+    })
+    
+    simple_documents.append({
+        "timestamp": time.time(),
+        "fascia_oraria": "2-pomeriggio",
+        "siti_aperti": time_of_day_counters["pomeriggio"]
+    })
+    
+    simple_documents.append({
+        "timestamp": time.time(),
+        "fascia_oraria": "3-sera",
+        "siti_aperti": time_of_day_counters["sera"]
+    })
+    
+    simple_documents.append({
+        "timestamp": time.time(),
+        "fascia_oraria": "4-notte",
+        "siti_aperti": time_of_day_counters["notte"]
+    })
+    
+    # ID univoco per questo batch, usato come parte del document_id
+    batch_id_str = str(int(time.time()))
+    
+    # Crea un DataFrame con i documenti
+    simple_df = spark.createDataFrame(simple_documents)
+    
+    # Invia i documenti a un nuovo indice dedicato al grafico a barre
+    simple_df.write \
+        .format("org.elasticsearch.spark.sql") \
+        .option("es.nodes", "elasticsearch") \
+        .option("es.port", "9200") \
+        .option("es.resource", "barchart_fasce_orarie") \
+        .option("es.write.operation", "index") \
+        .mode("append") \
+        .save()
+    
+    print("Dati inviati a Elasticsearch con struttura semplificata per grafico a barre.")
 
 # Avvia lo streaming e processa ogni micro-batch
 query = parsed_df.writeStream \
@@ -239,3 +335,4 @@ query = parsed_df.writeStream \
     .start()
 
 query.awaitTermination()
+
