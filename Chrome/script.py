@@ -21,7 +21,7 @@ UPDATE_INTERVAL = 10      # Intervallo di aggiornamento in secondi per inviare d
 
 # Configurazione Fluentd
 FLUENTD_TAG = "browsing.stats"
-FLUENTD_HOST = "localhost"  # Cambia con l'indirizzo IP del tuo container Docker se necessario
+FLUENTD_HOST = "localhost"  
 FLUENTD_PORT = 24224        # Porta predefinita di Fluentd
 
 # Inizializza il logger Fluentd
@@ -75,7 +75,7 @@ def save_to_json_backup(record):
             # Se il file è corrotto, creiamo un nuovo array vuoto
             data = []
     
-    # Aggiungi il nuovo record
+    # Aggiungo il nuovo record
     data.append(record)
     
     # Salva i dati aggiornati
@@ -109,7 +109,7 @@ def is_temporary_url(url):
     """
     Verifica se l'URL è temporaneo o di reindirizzamento.
     """
-    temporary_domains = ["ogs.google.com", "www.google.com"]  # Aggiungi altri domini temporanei qui
+    temporary_domains = ["ogs.google.com", "www.google.com"]  # Se serve aggiungo altri domini temporanei qui
     return any(domain in url for domain in temporary_domains)
 
 def make_handle_frame_navigated(tab):
@@ -276,7 +276,7 @@ def periodic_update():
             print(f"Errore durante l'aggiornamento periodico: {e}")
 
 def main():
-    #browser = pychrome.Browser(url="http://127.0.0.1:9222")
+    
     #browser = pychrome.Browser(url="http://host.docker.internal:9222")
     browser = pychrome.Browser(url="http://localhost:9222")
     known_tabs = {}

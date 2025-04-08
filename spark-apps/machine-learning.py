@@ -39,7 +39,7 @@ def generate_synthetic_data(n_samples=5000):
     return pd.DataFrame(samples)
 
 if __name__ == "__main__":
-    # Inizializza SparkSession
+    # Inizializziamo SparkSession
     spark = SparkSession.builder.appName("AgeGroupPrediction").getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
     
@@ -78,7 +78,7 @@ if __name__ == "__main__":
     model = pipeline.fit(train_df)
     print("[+] Addestramento completato.")
 
-    # Valuta il modello
+    # Valuta il modello finalmente
     predictions = model.transform(test_df)
     evaluator = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="accuracy")
     accuracy = evaluator.evaluate(predictions)

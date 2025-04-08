@@ -295,7 +295,7 @@ def process_batch(batch_df, batch_id):
         .save()
     
     # ----- SOLUZIONE SEMPLIFICATA PER GRAFICO A BARRE IN KIBANA -----
-    # Usiamo un approccio diverso: creare un documento separato per ogni fascia oraria
+    # Creamio un documento separato per ogni fascia oraria
     # con un campo che indica la fascia oraria e uno che contiene il conteggio
     
     # Crea una lista di documenti semplici, uno per ogni fascia oraria
